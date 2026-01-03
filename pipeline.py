@@ -54,9 +54,11 @@ def run_pipeline(params, log):
     filler_segments = detect_fillers(words, params["filler_words"], log)
 
     log("Merging cut ranges...")
-    cut_segments = merge_segments(
-        filler_segments + silence_segments,
+    cut_segments = build_cut_segments(
+        filler_segments,
+        silence_segments,
         handle_ms=params["handle_ms"],
+        breath_ms=params.get("breath_ms", 0),
         duration=duration,
     )
 
@@ -452,6 +454,31 @@ def merge_segments(segments, handle_ms, duration):
         else:
             merged.append(segment)
     return merged
+
+
+def build_cut_segments(filler_segments, silence_segments, handle_ms, breath_ms, duration):
+    filler_cuts = merge_segments(filler_segments, handle_ms=handle_ms, duration=duration)
+    silence_cuts = []
+    merged_silences = merge_segments(silence_segments, handle_ms=handle_ms, duration=duration)
+    breath = max(0.0, breath_ms / 1000.0)
+
+    for segment in merged_silences:
+        if breath <= 0.0:
+            silence_cuts.append(segment)
+            continue
+        seg_len = segment.end - segment.start
+        if seg_len <= breath:
+            continue
+        keep_start = segment.start + (seg_len - breath) / 2.0
+        keep_end = keep_start + breath
+        left = Segment(start=segment.start, end=keep_start)
+        right = Segment(start=keep_end, end=segment.end)
+        if left.end > left.start:
+            silence_cuts.append(left)
+        if right.end > right.start:
+            silence_cuts.append(right)
+
+    return merge_segments(filler_cuts + silence_cuts, handle_ms=0, duration=duration)
 
 
 def invert_segments(cut_segments, duration):

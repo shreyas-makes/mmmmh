@@ -71,6 +71,11 @@ class MainWindow(QMainWindow):
         self.handle_ms.setValue(100)
         self.handle_ms.setSuffix(" ms")
 
+        self.breath_ms = QSpinBox()
+        self.breath_ms.setRange(0, 500)
+        self.breath_ms.setValue(120)
+        self.breath_ms.setSuffix(" ms")
+
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
 
@@ -103,6 +108,7 @@ class MainWindow(QMainWindow):
         form.addRow("Aggressiveness", self.aggression)
         form.addRow("Aggressiveness details", self.aggression_label)
         form.addRow("Handle size", self.handle_ms)
+        form.addRow("Breathing space", self.breath_ms)
         form.addRow("Filler words", self.filler_words)
 
         layout.addLayout(form)
@@ -154,6 +160,7 @@ class MainWindow(QMainWindow):
             "silence_db": settings["silence_db"],
             "min_silence": settings["min_silence"],
             "handle_ms": self.handle_ms.value(),
+            "breath_ms": self.breath_ms.value(),
             "filler_words": [w.strip() for w in self.filler_words.text().split(",") if w.strip()],
         }
 
