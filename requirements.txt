@@ -1,0 +1,4 @@
+pyside6
+nemo_toolkit[asr]
+torch
+torchaudio
