@@ -67,7 +67,13 @@ def run_pipeline(params, log):
         raise RuntimeError("No keepable segments detected. Try lower aggressiveness.")
 
     log("Exporting with ffmpeg...")
-    export_video(str(input_path), str(output_path), keep_segments, log)
+    export_video(
+        str(input_path),
+        str(output_path),
+        keep_segments,
+        log,
+        audio_fade_ms=params.get("audio_fade_ms", 40),
+    )
 
     return {
         "input": str(input_path),
@@ -497,18 +503,30 @@ def invert_segments(cut_segments, duration):
     return keep
 
 
-def export_video(input_path, output_path, keep_segments, log):
+def export_video(input_path, output_path, keep_segments, log, audio_fade_ms=40):
     video_filters = []
     audio_filters = []
     concat_inputs = []
+    fade_sec = max(0.0, audio_fade_ms / 1000.0)
 
     for idx, segment in enumerate(keep_segments):
+        seg_duration = max(0.0, segment.end - segment.start)
         video_filters.append(
             f"[0:v]trim=start={segment.start}:end={segment.end},setpts=PTS-STARTPTS[v{idx}]"
         )
-        audio_filters.append(
-            f"[0:a]atrim=start={segment.start}:end={segment.end},asetpts=PTS-STARTPTS[a{idx}]"
+        audio_chain = (
+            f"[0:a]atrim=start={segment.start}:end={segment.end},asetpts=PTS-STARTPTS"
         )
+        if fade_sec > 0.0 and seg_duration > 0.0:
+            effective_fade = min(fade_sec, seg_duration / 2.0)
+            if effective_fade > 0.0:
+                fade_out_start = max(0.0, seg_duration - effective_fade)
+                audio_chain += (
+                    f",afade=t=in:st=0:d={effective_fade:.3f}"
+                    f",afade=t=out:st={fade_out_start:.3f}:d={effective_fade:.3f}"
+                )
+        audio_chain += f"[a{idx}]"
+        audio_filters.append(audio_chain)
         concat_inputs.append(f"[v{idx}][a{idx}]")
 
     filter_complex = ";".join(video_filters + audio_filters)

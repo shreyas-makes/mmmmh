@@ -49,6 +49,7 @@ python app.py
 ## Settings
 - Aggressiveness: higher removes more silence (shorter min silence, higher threshold).
 - Handle size: adds padding around each cut segment.
+- Audio fade: short fade-in/out at each stitch to smooth abrupt audio changes.
 - Filler words: comma-separated list matched case-insensitively.
 
 ## Project layout
