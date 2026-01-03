@@ -6,6 +6,7 @@ Mac GUI that removes silences and filler words from videos, then exports a YouTu
 - Silence detection with adjustable aggressiveness.
 - Filler-word cutting from Parakeet TDT transcripts.
 - Handle padding around cuts to avoid clipped syllables.
+- Optional transcript export to `.txt`.
 - Exports `.mp4` (H.264 + AAC) ready for upload.
 - Supports `.mp4`, `.mov`, and `.m4v` inputs.
 
@@ -42,14 +43,16 @@ python app.py
 ## Usage
 1. Choose the input video.
 2. Pick an output `.mp4` path.
-3. Adjust aggressiveness and handle size.
-4. Edit filler words if needed.
-5. Click Process.
+3. (Optional) Keep or change the transcript `.txt` path.
+4. Adjust aggressiveness and handle size.
+5. Edit filler words if needed.
+6. Click Process.
 
 ## Settings
 - Aggressiveness: higher removes more silence (shorter min silence, higher threshold).
 - Handle size: adds padding around each cut segment.
 - Audio fade: short fade-in/out at each stitch to smooth abrupt audio changes.
+- Save transcript: writes a `.txt` transcript next to the output by default.
 - Filler words: comma-separated list matched case-insensitively.
 
 ## Project layout

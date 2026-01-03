@@ -6,6 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -54,6 +55,7 @@ class MainWindow(QMainWindow):
 
         self.input_path = QLineEdit()
         self.output_path = QLineEdit()
+        self.output_path.editingFinished.connect(self.handle_output_edited)
         self.filler_words = QLineEdit(
             "um, uh, uhh, umm, erm, ah, aah, like, you know, sort of, kind of"
         )
@@ -68,7 +70,7 @@ class MainWindow(QMainWindow):
 
         self.handle_ms = QSpinBox()
         self.handle_ms.setRange(0, 500)
-        self.handle_ms.setValue(100)
+        self.handle_ms.setValue(200)
         self.handle_ms.setSuffix(" ms")
 
         self.breath_ms = QSpinBox()
@@ -78,8 +80,15 @@ class MainWindow(QMainWindow):
 
         self.audio_fade_ms = QSpinBox()
         self.audio_fade_ms.setRange(0, 200)
-        self.audio_fade_ms.setValue(40)
+        self.audio_fade_ms.setValue(50)
         self.audio_fade_ms.setSuffix(" ms")
+
+        self.save_transcript = QCheckBox("Save transcript")
+        self.save_transcript.setChecked(True)
+
+        self.transcript_path = QLineEdit()
+        self.transcript_auto = True
+        self.transcript_path.textEdited.connect(self.disable_transcript_auto)
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -93,6 +102,9 @@ class MainWindow(QMainWindow):
 
         browse_out = QPushButton("Choose output")
         browse_out.clicked.connect(self.choose_output)
+
+        browse_transcript = QPushButton("Choose transcript")
+        browse_transcript.clicked.connect(self.choose_transcript)
 
         self.run_btn = QPushButton("Process")
         self.run_btn.clicked.connect(self.run_pipeline)
@@ -109,6 +121,11 @@ class MainWindow(QMainWindow):
         output_row.addWidget(self.output_path)
         output_row.addWidget(browse_out)
         form.addRow("Output MP4", output_row)
+
+        transcript_row = QHBoxLayout()
+        transcript_row.addWidget(self.transcript_path)
+        transcript_row.addWidget(browse_transcript)
+        form.addRow(self.save_transcript, transcript_row)
 
         form.addRow("Aggressiveness", self.aggression)
         form.addRow("Aggressiveness details", self.aggression_label)
@@ -138,6 +155,7 @@ class MainWindow(QMainWindow):
             if not self.output_path.text():
                 output = str(Path(path).with_name(Path(path).stem + "_snappy.mp4"))
                 self.output_path.setText(output)
+                self.maybe_set_transcript_path(output)
 
     def choose_output(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -145,6 +163,28 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.output_path.setText(path)
+            self.maybe_set_transcript_path(path)
+
+    def handle_output_edited(self):
+        self.maybe_set_transcript_path(self.output_path.text().strip())
+
+    def choose_transcript(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Transcript", "", "Text Files (*.txt)"
+        )
+        if path:
+            self.transcript_auto = False
+            self.transcript_path.setText(path)
+
+    def disable_transcript_auto(self):
+        self.transcript_auto = False
+
+    def maybe_set_transcript_path(self, output_path):
+        if not self.transcript_auto or not output_path:
+            return
+        base = Path(output_path)
+        transcript = base.with_suffix(".txt")
+        self.transcript_path.setText(str(transcript))
 
     def update_aggression_label(self):
         settings = self.derive_silence_settings(self.aggression.value())
@@ -169,6 +209,8 @@ class MainWindow(QMainWindow):
             "breath_ms": self.breath_ms.value(),
             "audio_fade_ms": self.audio_fade_ms.value(),
             "filler_words": [w.strip() for w in self.filler_words.text().split(",") if w.strip()],
+            "save_transcript": self.save_transcript.isChecked(),
+            "transcript_path": self.transcript_path.text().strip(),
         }
 
         self.log.clear()

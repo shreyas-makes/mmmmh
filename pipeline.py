@@ -75,6 +75,10 @@ def run_pipeline(params, log):
         audio_fade_ms=params.get("audio_fade_ms", 40),
     )
 
+    if params.get("save_transcript") and params.get("transcript_path"):
+        log("Writing transcript...")
+        write_transcript(words, keep_segments, params["transcript_path"], log)
+
     return {
         "input": str(input_path),
         "output": str(output_path),
@@ -558,3 +562,29 @@ def export_video(input_path, output_path, keep_segments, log, audio_fade_ms=40):
     ]
 
     run_cmd(cmd, log)
+
+
+def write_transcript(words, keep_segments, transcript_path, log):
+    tokens = []
+    segment_index = 0
+    for item in words:
+        word = str(item.get("word", "")).strip()
+        if not word:
+            continue
+        start = item.get("start")
+        if start is not None:
+            while segment_index < len(keep_segments) and start >= keep_segments[segment_index].end:
+                segment_index += 1
+            if segment_index >= len(keep_segments):
+                break
+            if start < keep_segments[segment_index].start:
+                continue
+        if tokens and word in {".", ",", "!", "?", ":", ";"}:
+            tokens[-1] += word
+        else:
+            tokens.append(word)
+    text = " ".join(tokens).strip()
+    path = Path(transcript_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text + "\n", encoding="utf-8")
+    log(f"Transcript saved to {path}")
