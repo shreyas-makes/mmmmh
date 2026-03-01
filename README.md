@@ -7,6 +7,9 @@ Mac GUI that removes silences and filler words from videos, then exports a YouTu
 - Filler-word cutting from Parakeet TDT transcripts.
 - Handle padding around cuts to avoid clipped syllables.
 - Optional transcript export to `.txt`.
+- Captions generated with Parakeet and aligned to the edited timeline.
+- Editable caption segment UI before export.
+- Caption output as sidecar `.srt` and embedded MP4 subtitle track.
 - Exports `.mp4` (H.264 + AAC) ready for upload.
 - Supports `.mp4`, `.mov`, and `.m4v` inputs.
 
@@ -46,14 +49,18 @@ python app.py
 3. (Optional) Keep or change the transcript `.txt` path.
 4. Adjust aggressiveness and handle size.
 5. Edit filler words if needed.
-6. Click Process.
+6. (Optional) Generate/refresh captions, then edit caption text rows.
+7. Click Process.
 
 ## Settings
-- Aggressiveness: higher removes more silence (shorter min silence, higher threshold).
+- Aggressiveness: higher removes more silence (shorter minimum pause length, less negative threshold).
 - Handle size: adds padding around each cut segment.
+- Pause floor: keeps a minimum amount of conversational pause so cuts do not sound choppy.
 - Audio fade: short fade-in/out at each stitch to smooth abrupt audio changes.
 - Save transcript: writes a `.txt` transcript next to the output by default.
 - Filler words: comma-separated list matched case-insensitively.
+- Enable captions: on by default; writes `.srt` and embeds subtitles into MP4.
+- Caption editor: lets you change caption text per timestamped segment.
 
 ## Project layout
 - `app.py`: PySide6 GUI and parameter mapping.

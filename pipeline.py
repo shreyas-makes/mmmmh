@@ -13,9 +13,21 @@ class Segment:
     end: float
 
 
+@dataclass
+class CaptionSegment:
+    start: float
+    end: float
+    text: str
+
+
 def run_pipeline(params, log):
     input_path = Path(params["input_path"]).expanduser()
     output_path = Path(params["output_path"]).expanduser()
+    captions_enabled = params.get("captions_enabled", True)
+    caption_srt_path = params.get("caption_srt_path") or str(output_path.with_suffix(".srt"))
+    caption_segments_override = normalize_caption_override(
+        params.get("caption_segments_override")
+    )
 
     if not input_path.exists():
         raise FileNotFoundError(f"Input not found: {input_path}")
@@ -52,6 +64,10 @@ def run_pipeline(params, log):
 
     log("Detecting filler words...")
     filler_segments = detect_fillers(words, params["filler_words"], log)
+    pause_floor_ms = resolve_pause_floor_ms(
+        params.get("pause_floor_ms"), params.get("breath_ms", 0)
+    )
+    log(f"Pause floor: {pause_floor_ms} ms")
 
     log("Merging cut ranges...")
     cut_segments = build_cut_segments(
@@ -59,6 +75,7 @@ def run_pipeline(params, log):
         silence_segments,
         handle_ms=params["handle_ms"],
         breath_ms=params.get("breath_ms", 0),
+        pause_floor_ms=pause_floor_ms,
         duration=duration,
     )
 
@@ -66,14 +83,38 @@ def run_pipeline(params, log):
     if not keep_segments:
         raise RuntimeError("No keepable segments detected. Try lower aggressiveness.")
 
+    caption_segments = []
+    if captions_enabled:
+        if caption_segments_override:
+            caption_segments = caption_segments_override
+            log(f"Using {len(caption_segments)} user-edited caption segments.")
+        else:
+            words_on_output = remap_words_to_output_timeline(words, keep_segments)
+            caption_segments = build_caption_segments(words_on_output)
+            if not caption_segments:
+                raise RuntimeError("No caption segments generated from edited output.")
+        write_srt(caption_segments, caption_srt_path, log)
+
     log("Exporting with ffmpeg...")
-    export_video(
-        str(input_path),
-        str(output_path),
-        keep_segments,
-        log,
-        audio_fade_ms=params.get("audio_fade_ms", 40),
-    )
+    if captions_enabled:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_video_path = str(Path(tmpdir) / "video_no_captions.mp4")
+            export_video(
+                str(input_path),
+                temp_video_path,
+                keep_segments,
+                log,
+                audio_fade_ms=params.get("audio_fade_ms", 40),
+            )
+            mux_subtitles_into_mp4(temp_video_path, caption_srt_path, str(output_path), log)
+    else:
+        export_video(
+            str(input_path),
+            str(output_path),
+            keep_segments,
+            log,
+            audio_fade_ms=params.get("audio_fade_ms", 40),
+        )
 
     if params.get("save_transcript") and params.get("transcript_path"):
         log("Writing transcript...")
@@ -85,6 +126,68 @@ def run_pipeline(params, log):
         "duration": duration,
         "cut_segments": len(cut_segments),
         "keep_segments": len(keep_segments),
+        "captions_enabled": captions_enabled,
+        "captions_segments_count": len(caption_segments),
+        "captions_srt_path": str(Path(caption_srt_path).expanduser()) if captions_enabled else "",
+        "captions_embedded": captions_enabled,
+    }
+
+
+def preview_captions(params, log):
+    input_path = Path(params["input_path"]).expanduser()
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input not found: {input_path}")
+
+    log("Extracting audio for caption preview...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wav_path = Path(tmpdir) / "audio.wav"
+        run_cmd(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(input_path),
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                str(wav_path),
+            ],
+            log,
+        )
+        log("Transcribing with Parakeet TDT for caption preview...")
+        words, has_timestamps = transcribe_with_parakeet(str(wav_path), log)
+
+    log("Detecting silences for caption preview...")
+    silence_segments = detect_silences(
+        str(input_path), params["silence_db"], params["min_silence"], log
+    )
+    duration = get_duration(str(input_path), log)
+    if not has_timestamps:
+        words = assign_word_timestamps(words, silence_segments, duration, log)
+
+    filler_segments = detect_fillers(words, params["filler_words"], log)
+    pause_floor_ms = resolve_pause_floor_ms(
+        params.get("pause_floor_ms"), params.get("breath_ms", 0)
+    )
+    log(f"Pause floor for preview: {pause_floor_ms} ms")
+    cut_segments = build_cut_segments(
+        filler_segments,
+        silence_segments,
+        handle_ms=params["handle_ms"],
+        breath_ms=params.get("breath_ms", 0),
+        pause_floor_ms=pause_floor_ms,
+        duration=duration,
+    )
+    keep_segments = invert_segments(cut_segments, duration)
+    words_on_output = remap_words_to_output_timeline(words, keep_segments)
+    caption_segments = build_caption_segments(words_on_output)
+    if not caption_segments:
+        raise RuntimeError("No caption segments were generated in preview.")
+
+    return {
+        "segments": [caption_segment_to_dict(seg) for seg in caption_segments],
+        "segments_count": len(caption_segments),
     }
 
 
@@ -341,6 +444,154 @@ def assign_word_timestamps(words, silence_segments, duration, log):
     return assigned
 
 
+def remap_words_to_output_timeline(words, keep_segments):
+    remapped = []
+    for item in words:
+        raw_word = str(item.get("word", "")).strip()
+        start = item.get("start")
+        if not raw_word or start is None:
+            continue
+
+        end = item.get("end")
+        start_out = map_time_to_output_timeline(float(start), keep_segments)
+        if start_out is None:
+            continue
+
+        end_in = float(end) if end is not None else float(start) + 0.12
+        end_out = map_time_to_output_timeline(end_in, keep_segments)
+        if end_out is None or end_out <= start_out:
+            end_out = start_out + 0.12
+
+        remapped.append({"word": raw_word, "start": start_out, "end": end_out})
+    return remapped
+
+
+def map_time_to_output_timeline(value, keep_segments):
+    elapsed = 0.0
+    for segment in keep_segments:
+        if value < segment.start:
+            return None
+        if segment.start <= value <= segment.end:
+            return elapsed + (value - segment.start)
+        elapsed += segment.end - segment.start
+    return None
+
+
+def build_caption_segments(
+    words,
+    max_chars=42,
+    max_duration=3.5,
+    punctuation_split_min_chars=18,
+    gap_threshold=0.35,
+):
+    if not words:
+        return []
+
+    segments = []
+    current = []
+    current_start = None
+    last_end = None
+
+    for item in words:
+        word = str(item["word"]).strip()
+        start = float(item["start"])
+        end = float(item.get("end") or start + 0.12)
+        if not word:
+            continue
+
+        if not current:
+            current = [item]
+            current_start = start
+            last_end = end
+            continue
+
+        gap = max(0.0, start - (last_end or start))
+        candidate = current + [item]
+        candidate_text = join_tokens([str(x["word"]).strip() for x in candidate]).strip()
+        candidate_duration = max(0.0, end - float(current_start))
+
+        if (
+            gap > gap_threshold
+            or len(candidate_text) > max_chars
+            or candidate_duration > max_duration
+        ):
+            segments.append(
+                CaptionSegment(
+                    start=float(current_start),
+                    end=float(last_end or current_start),
+                    text=join_tokens([str(x["word"]).strip() for x in current]).strip(),
+                )
+            )
+            current = [item]
+            current_start = start
+            last_end = end
+            continue
+
+        current.append(item)
+        last_end = end
+        current_text = join_tokens([str(x["word"]).strip() for x in current]).strip()
+        if (
+            ends_with_sentence_punctuation(word)
+            and len(current_text) >= punctuation_split_min_chars
+        ):
+            segments.append(
+                CaptionSegment(
+                    start=float(current_start),
+                    end=float(last_end),
+                    text=current_text,
+                )
+            )
+            current = []
+            current_start = None
+            last_end = None
+
+    if current:
+        segments.append(
+            CaptionSegment(
+                start=float(current_start or 0.0),
+                end=float(last_end or (current_start or 0.0) + 0.12),
+                text=join_tokens([str(x["word"]).strip() for x in current]).strip(),
+            )
+        )
+
+    normalized = []
+    for segment in segments:
+        text = segment.text.strip()
+        if not text:
+            continue
+        start = max(0.0, float(segment.start))
+        end = max(start + 0.05, float(segment.end))
+        normalized.append(CaptionSegment(start=start, end=end, text=text))
+    return normalized
+
+
+def ends_with_sentence_punctuation(word):
+    return bool(re.search(r"[.!?]$", word))
+
+
+def normalize_caption_override(segments):
+    if not isinstance(segments, list):
+        return []
+
+    normalized = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        text = str(segment.get("text", "")).strip()
+        start = segment.get("start")
+        end = segment.get("end")
+        if not text or start is None or end is None:
+            continue
+        start_value = max(0.0, float(start))
+        end_value = max(start_value + 0.05, float(end))
+        normalized.append(CaptionSegment(start=start_value, end=end_value, text=text))
+    return normalized
+
+
+def caption_segment_to_dict(segment):
+    return {"start": segment.start, "end": segment.end, "text": segment.text}
+
+
 def words_from_chars(char_items):
     words = []
     current = []
@@ -466,21 +717,24 @@ def merge_segments(segments, handle_ms, duration):
     return merged
 
 
-def build_cut_segments(filler_segments, silence_segments, handle_ms, breath_ms, duration):
+def build_cut_segments(
+    filler_segments, silence_segments, handle_ms, breath_ms, pause_floor_ms, duration
+):
     filler_cuts = merge_segments(filler_segments, handle_ms=handle_ms, duration=duration)
     silence_cuts = []
     merged_silences = merge_segments(silence_segments, handle_ms=handle_ms, duration=duration)
-    breath = max(0.0, breath_ms / 1000.0)
+    pause_floor_ms = resolve_pause_floor_ms(pause_floor_ms, breath_ms)
+    pause_floor = max(0.0, pause_floor_ms / 1000.0)
 
     for segment in merged_silences:
-        if breath <= 0.0:
+        if pause_floor <= 0.0:
             silence_cuts.append(segment)
             continue
         seg_len = segment.end - segment.start
-        if seg_len <= breath:
+        if seg_len <= pause_floor:
             continue
-        keep_start = segment.start + (seg_len - breath) / 2.0
-        keep_end = keep_start + breath
+        keep_start = segment.start + (seg_len - pause_floor) / 2.0
+        keep_end = keep_start + pause_floor
         left = Segment(start=segment.start, end=keep_start)
         right = Segment(start=keep_end, end=segment.end)
         if left.end > left.start:
@@ -489,6 +743,12 @@ def build_cut_segments(filler_segments, silence_segments, handle_ms, breath_ms, 
             silence_cuts.append(right)
 
     return merge_segments(filler_cuts + silence_cuts, handle_ms=0, duration=duration)
+
+
+def resolve_pause_floor_ms(pause_floor_ms, breath_ms):
+    if pause_floor_ms is None:
+        return max(int(breath_ms), 180)
+    return int(pause_floor_ms)
 
 
 def invert_segments(cut_segments, duration):
@@ -564,6 +824,60 @@ def export_video(input_path, output_path, keep_segments, log, audio_fade_ms=40):
     run_cmd(cmd, log)
 
 
+def format_srt_time(seconds):
+    total_ms = max(0, int(round(seconds * 1000)))
+    hours = total_ms // 3_600_000
+    minutes = (total_ms % 3_600_000) // 60_000
+    secs = (total_ms % 60_000) // 1000
+    millis = total_ms % 1000
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def write_srt(segments, srt_path, log):
+    path = Path(srt_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for idx, segment in enumerate(segments, start=1):
+        lines.append(str(idx))
+        lines.append(
+            f"{format_srt_time(segment.start)} --> {format_srt_time(segment.end)}"
+        )
+        lines.append(segment.text)
+        lines.append("")
+    path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    log(f"Captions saved to {path}")
+
+
+def mux_subtitles_into_mp4(video_path, srt_path, output_path, log):
+    Path(output_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-i",
+        srt_path,
+        "-map",
+        "0:v",
+        "-map",
+        "0:a",
+        "-map",
+        "1:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "copy",
+        "-c:s",
+        "mov_text",
+        "-metadata:s:s:0",
+        "language=eng",
+        "-disposition:s:0",
+        "default",
+        output_path,
+    ]
+    run_cmd(cmd, log)
+
+
 def write_transcript(words, keep_segments, transcript_path, log):
     tokens = []
     segment_index = 0
@@ -588,3 +902,16 @@ def write_transcript(words, keep_segments, transcript_path, log):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text + "\n", encoding="utf-8")
     log(f"Transcript saved to {path}")
+
+
+def join_tokens(tokens):
+    merged = []
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+        if merged and token in {".", ",", "!", "?", ":", ";"}:
+            merged[-1] += token
+        else:
+            merged.append(token)
+    return " ".join(merged)
