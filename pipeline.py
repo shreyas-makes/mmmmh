@@ -22,9 +22,13 @@ class CaptionSegment:
 
 def run_pipeline(params, log):
     input_path = Path(params["input_path"]).expanduser()
-    output_path = Path(params["output_path"]).expanduser()
+    output_path = ensure_path_suffix(Path(params["output_path"]).expanduser(), ".mp4").resolve()
+    if not str(params["output_path"]).lower().endswith(".mp4"):
+        log(f"Output path missing .mp4 extension. Using: {output_path}")
     captions_enabled = params.get("captions_enabled", True)
-    caption_srt_path = params.get("caption_srt_path") or str(output_path.with_suffix(".srt"))
+    caption_srt_path = str(
+        Path(params.get("caption_srt_path") or output_path.with_suffix(".srt")).expanduser().resolve()
+    )
     caption_segments_override = normalize_caption_override(
         params.get("caption_segments_override")
     )
@@ -41,6 +45,11 @@ def run_pipeline(params, log):
                 "-y",
                 "-i",
                 str(input_path),
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-sn",
+                "-dn",
                 "-ac",
                 "1",
                 "-ar",
@@ -62,19 +71,13 @@ def run_pipeline(params, log):
     if not has_timestamps:
         words = assign_word_timestamps(words, silence_segments, duration, log)
 
-    log("Detecting filler words...")
-    filler_segments = detect_fillers(words, params["filler_words"], log)
-    pause_floor_ms = resolve_pause_floor_ms(
-        params.get("pause_floor_ms"), params.get("breath_ms", 0)
-    )
-    log(f"Pause floor: {pause_floor_ms} ms")
+    pause_floor_ms = resolve_pause_floor_ms(params.get("pause_floor_ms"))
+    log(f"Keeping up to {pause_floor_ms} ms per silence.")
 
     log("Merging cut ranges...")
     cut_segments = build_cut_segments(
-        filler_segments,
         silence_segments,
         handle_ms=params["handle_ms"],
-        breath_ms=params.get("breath_ms", 0),
         pause_floor_ms=pause_floor_ms,
         duration=duration,
     )
@@ -106,7 +109,7 @@ def run_pipeline(params, log):
                 log,
                 audio_fade_ms=params.get("audio_fade_ms", 40),
             )
-            mux_subtitles_into_mp4(temp_video_path, caption_srt_path, str(output_path), log)
+            burn_subtitles_into_mp4(temp_video_path, caption_srt_path, str(output_path), log)
     else:
         export_video(
             str(input_path),
@@ -133,6 +136,12 @@ def run_pipeline(params, log):
     }
 
 
+def ensure_path_suffix(path, suffix):
+    if path.suffix.lower() == suffix.lower():
+        return path
+    return path.with_suffix(suffix)
+
+
 def preview_captions(params, log):
     input_path = Path(params["input_path"]).expanduser()
     if not input_path.exists():
@@ -147,6 +156,11 @@ def preview_captions(params, log):
                 "-y",
                 "-i",
                 str(input_path),
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-sn",
+                "-dn",
                 "-ac",
                 "1",
                 "-ar",
@@ -166,16 +180,11 @@ def preview_captions(params, log):
     if not has_timestamps:
         words = assign_word_timestamps(words, silence_segments, duration, log)
 
-    filler_segments = detect_fillers(words, params["filler_words"], log)
-    pause_floor_ms = resolve_pause_floor_ms(
-        params.get("pause_floor_ms"), params.get("breath_ms", 0)
-    )
-    log(f"Pause floor for preview: {pause_floor_ms} ms")
+    pause_floor_ms = resolve_pause_floor_ms(params.get("pause_floor_ms"))
+    log(f"Pause keep setting for preview: {pause_floor_ms} ms")
     cut_segments = build_cut_segments(
-        filler_segments,
         silence_segments,
         handle_ms=params["handle_ms"],
-        breath_ms=params.get("breath_ms", 0),
         pause_floor_ms=pause_floor_ms,
         duration=duration,
     )
@@ -251,31 +260,30 @@ def transcribe_with_parakeet(audio_path, log):
         raise RuntimeError("Parakeet transcription returned no hypotheses.")
 
     hyp = hypotheses[0]
+    timestamp_scale = infer_timestamp_scale(hyp)
     words = []
 
     if hasattr(hyp, "words"):
-        for item in hyp.words:
-            parsed = parse_timestamp_item(item)
-            if parsed:
-                words.append(parsed)
-    else:
-        word_items = extract_timestamp_items(hyp, ["word", "words"])
-        if word_items:
-            words.extend(parse_timestamp_items(word_items))
-        elif isinstance(hyp, dict) and "words" in hyp:
-            words.extend(parse_timestamp_items(hyp["words"]))
+        words.extend(parse_timestamp_items(hyp.words, timestamp_scale=timestamp_scale))
+
+    word_items = extract_timestamp_items(hyp, ["word", "words"])
+    if word_items:
+        words.extend(parse_timestamp_items(word_items, timestamp_scale=timestamp_scale))
+    elif isinstance(hyp, dict) and "words" in hyp:
+        words.extend(parse_timestamp_items(hyp["words"], timestamp_scale=timestamp_scale))
 
     words = [w for w in words if w.get("word") and w.get("start") is not None]
+    words = dedupe_word_timestamps(words)
 
     if not words:
         char_items = extract_timestamp_items(hyp, ["char", "chars"])
         if char_items:
-            words = words_from_chars(char_items)
+            words = words_from_chars(char_items, timestamp_scale=timestamp_scale)
 
     if not words:
         segments = extract_timestamp_items(hyp, ["segment", "segments"])
         if segments:
-            words = words_from_segments(segments, log)
+            words = words_from_segments(segments, log, timestamp_scale=timestamp_scale)
 
     if words:
         return words, True
@@ -293,7 +301,7 @@ def transcribe_with_parakeet(audio_path, log):
 
 
 def extract_timestamp_items(hyp, keys):
-    for attr_name in ("timestamps", "timestep"):
+    for attr_name in ("timestamps", "timestamp", "timestep"):
         value = getattr(hyp, attr_name, None)
         items = extract_from_container(value, keys)
         if items:
@@ -324,36 +332,146 @@ def extract_from_container(container, keys):
     return None
 
 
-def parse_timestamp_items(items):
+def parse_timestamp_items(items, timestamp_scale=1.0):
     parsed = []
+    if not isinstance(items, (list, tuple)):
+        return parsed
     for item in items:
-        parsed_item = parse_timestamp_item(item)
+        parsed_item = parse_timestamp_item(item, timestamp_scale=timestamp_scale)
         if parsed_item:
             parsed.append(parsed_item)
     return parsed
 
 
-def parse_timestamp_item(item):
+def parse_timestamp_item(item, timestamp_scale=1.0):
     if item is None or isinstance(item, str):
         return None
     if isinstance(item, dict):
-        word = item.get("word") or item.get("text")
-        start = item.get("start")
-        end = item.get("end") or start
+        word = item.get("word") or item.get("text") or item.get("token")
+        start, start_key = first_present(
+            item, ["start", "start_time", "startTime", "start_offset", "offset"]
+        )
+        end, end_key = first_present(item, ["end", "end_time", "endTime", "end_offset"])
         if word and start is not None:
-            return {"word": word, "start": start, "end": end}
+            start_value = normalize_timestamp_value(start, start_key, timestamp_scale)
+            end_value = normalize_timestamp_value(
+                end if end is not None else start,
+                end_key if end_key is not None else start_key,
+                timestamp_scale,
+            )
+            if start_value is None:
+                return None
+            if end_value is None or end_value < start_value:
+                end_value = start_value
+            return {"word": str(word), "start": start_value, "end": end_value}
         return None
     if isinstance(item, (list, tuple)) and len(item) >= 3:
         word, start, end = item[0], item[1], item[2]
         if isinstance(word, str) and start is not None:
-            return {"word": word, "start": start, "end": end}
-    if hasattr(item, "word") and hasattr(item, "start"):
-        return {"word": item.word, "start": item.start, "end": getattr(item, "end", None)}
+            start_value = normalize_timestamp_value(start, "start", timestamp_scale)
+            end_value = normalize_timestamp_value(
+                end if end is not None else start, "end", timestamp_scale
+            )
+            if start_value is None:
+                return None
+            if end_value is None or end_value < start_value:
+                end_value = start_value
+            return {"word": word, "start": start_value, "end": end_value}
+    if hasattr(item, "word"):
+        start, start_key = first_attr_present(
+            item, ["start", "start_time", "startTime", "start_offset", "offset"]
+        )
+        end, end_key = first_attr_present(item, ["end", "end_time", "endTime", "end_offset"])
+        if start is not None:
+            start_value = normalize_timestamp_value(start, start_key, timestamp_scale)
+            end_value = normalize_timestamp_value(
+                end if end is not None else start,
+                end_key if end_key is not None else start_key,
+                timestamp_scale,
+            )
+            if start_value is None:
+                return None
+            if end_value is None or end_value < start_value:
+                end_value = start_value
+            return {"word": str(item.word), "start": start_value, "end": end_value}
     return None
 
 
+def infer_timestamp_scale(hyp):
+    candidates = []
+    for container in (
+        hyp,
+        getattr(hyp, "timestamps", None),
+        getattr(hyp, "timestamp", None),
+        getattr(hyp, "timestep", None),
+    ):
+        if container is None:
+            continue
+        for key in ("timestep_duration", "time_stride", "frame_duration", "window_stride"):
+            value = None
+            if isinstance(container, dict):
+                value = container.get(key)
+            elif hasattr(container, "get"):
+                value = container.get(key)
+            else:
+                value = getattr(container, key, None)
+            if value is not None:
+                numeric = safe_float(value)
+                if numeric and numeric > 0:
+                    candidates.append(numeric)
+    return candidates[0] if candidates else 1.0
+
+
+def safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def first_present(mapping, keys):
+    for key in keys:
+        if key in mapping and mapping.get(key) is not None:
+            return mapping.get(key), key
+    return None, None
+
+
+def first_attr_present(obj, keys):
+    for key in keys:
+        value = getattr(obj, key, None)
+        if value is not None:
+            return value, key
+    return None, None
+
+
+def normalize_timestamp_value(value, source_key, timestamp_scale):
+    numeric = safe_float(value)
+    if numeric is None:
+        return None
+    key = source_key or ""
+    if "offset" in key and timestamp_scale > 0:
+        return numeric * timestamp_scale
+    return numeric
+
+
+def dedupe_word_timestamps(words):
+    deduped = []
+    seen = set()
+    for item in words:
+        key = (
+            str(item.get("word", "")).strip().lower(),
+            round(float(item.get("start", 0.0)), 4),
+            round(float(item.get("end", 0.0)), 4),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def describe_timestamp_debug(hyp, log):
-    for attr_name in ("timestamps", "timestep"):
+    for attr_name in ("timestamps", "timestamp", "timestep"):
         value = getattr(hyp, attr_name, None)
         if value is None:
             continue
@@ -592,7 +710,7 @@ def caption_segment_to_dict(segment):
     return {"start": segment.start, "end": segment.end, "text": segment.text}
 
 
-def words_from_chars(char_items):
+def words_from_chars(char_items, timestamp_scale=1.0):
     words = []
     current = []
     start = None
@@ -600,7 +718,9 @@ def words_from_chars(char_items):
     for item in char_items:
         if isinstance(item, str):
             continue
-        char = item.get("char") or item.get("text") or ""
+        if not isinstance(item, dict):
+            continue
+        char = item.get("char") or item.get("text") or item.get("token") or ""
         if not char.strip():
             if current:
                 words.append({"word": "".join(current), "start": start, "end": end})
@@ -609,8 +729,16 @@ def words_from_chars(char_items):
                 end = None
             continue
         if start is None:
-            start = item.get("start")
-        end = item.get("end") or item.get("start")
+            start_raw, start_key = first_present(
+                item, ["start", "start_time", "startTime", "start_offset", "offset"]
+            )
+            start = normalize_timestamp_value(start_raw, start_key, timestamp_scale)
+        end_raw, end_key = first_present(item, ["end", "end_time", "endTime", "end_offset"])
+        if end_raw is None:
+            end_raw, end_key = first_present(
+                item, ["start", "start_time", "startTime", "start_offset", "offset"]
+            )
+        end = normalize_timestamp_value(end_raw, end_key, timestamp_scale)
         current.append(char)
 
     if current:
@@ -618,14 +746,20 @@ def words_from_chars(char_items):
     return words
 
 
-def words_from_segments(segments, log):
+def words_from_segments(segments, log, timestamp_scale=1.0):
     words = []
     for segment in segments:
         if isinstance(segment, str):
             continue
+        if not isinstance(segment, dict):
+            continue
         text = segment.get("text") or segment.get("word") or ""
-        start = segment.get("start")
-        end = segment.get("end")
+        start, start_key = first_present(
+            segment, ["start", "start_time", "startTime", "start_offset", "offset"]
+        )
+        end, end_key = first_present(segment, ["end", "end_time", "endTime", "end_offset"])
+        start = normalize_timestamp_value(start, start_key, timestamp_scale)
+        end = normalize_timestamp_value(end, end_key, timestamp_scale)
         if start is None or end is None:
             continue
         tokens = [t for t in re.split(r"\s+", text.strip()) if t]
@@ -643,28 +777,16 @@ def words_from_segments(segments, log):
     return words
 
 
-def detect_fillers(words, filler_words, log):
-    fillers = {normalize_word(w) for w in filler_words}
-    segments = []
-    for item in words:
-        normalized = normalize_word(item["word"])
-        if normalized in fillers:
-            start = float(item["start"])
-            end = float(item.get("end") or start + 0.12)
-            segments.append(Segment(start=start, end=end))
-    log(f"Detected {len(segments)} filler segments.")
-    return segments
-
-
-def normalize_word(word):
-    return re.sub(r"[^a-z0-9]+", "", word.lower())
-
-
 def detect_silences(path, silence_db, min_silence, log):
     cmd = [
         "ffmpeg",
         "-i",
         path,
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-sn",
+        "-dn",
         "-af",
         f"silencedetect=n={silence_db}dB:d={min_silence}",
         "-f",
@@ -717,13 +839,10 @@ def merge_segments(segments, handle_ms, duration):
     return merged
 
 
-def build_cut_segments(
-    filler_segments, silence_segments, handle_ms, breath_ms, pause_floor_ms, duration
-):
-    filler_cuts = merge_segments(filler_segments, handle_ms=handle_ms, duration=duration)
+def build_cut_segments(silence_segments, handle_ms, pause_floor_ms, duration):
     silence_cuts = []
     merged_silences = merge_segments(silence_segments, handle_ms=handle_ms, duration=duration)
-    pause_floor_ms = resolve_pause_floor_ms(pause_floor_ms, breath_ms)
+    pause_floor_ms = resolve_pause_floor_ms(pause_floor_ms)
     pause_floor = max(0.0, pause_floor_ms / 1000.0)
 
     for segment in merged_silences:
@@ -742,12 +861,12 @@ def build_cut_segments(
         if right.end > right.start:
             silence_cuts.append(right)
 
-    return merge_segments(filler_cuts + silence_cuts, handle_ms=0, duration=duration)
+    return merge_segments(silence_cuts, handle_ms=0, duration=duration)
 
 
-def resolve_pause_floor_ms(pause_floor_ms, breath_ms):
+def resolve_pause_floor_ms(pause_floor_ms):
     if pause_floor_ms is None:
-        return max(int(breath_ms), 180)
+        return 180
     return int(pause_floor_ms)
 
 
@@ -876,6 +995,61 @@ def mux_subtitles_into_mp4(video_path, srt_path, output_path, log):
         output_path,
     ]
     run_cmd(cmd, log)
+
+
+def burn_subtitles_into_mp4(video_path, srt_path, output_path, log):
+    Path(output_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+    if not ffmpeg_supports_subtitles_filter():
+        log("ffmpeg 'subtitles' filter unavailable (missing libass). Falling back to embedded subtitle track.")
+        mux_subtitles_into_mp4(video_path, srt_path, output_path, log)
+        return
+    subtitle_path = escape_subtitles_filter_path(str(Path(srt_path).expanduser()))
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-vf",
+        f"subtitles={subtitle_path}",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-c:a",
+        "copy",
+        "-f",
+        "mp4",
+        output_path,
+    ]
+    try:
+        run_cmd(cmd, log)
+    except RuntimeError as exc:
+        log(
+            f"Hard-burn captions failed ({exc}). Falling back to embedded subtitle track."
+        )
+        mux_subtitles_into_mp4(video_path, srt_path, output_path, log)
+
+
+def ffmpeg_supports_subtitles_filter():
+    process = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True
+    )
+    output = (process.stdout or "") + "\n" + (process.stderr or "")
+    return bool(re.search(r"^\s*T\.\S*\s+subtitles\s", output, re.MULTILINE))
+
+
+def escape_subtitles_filter_path(path):
+    # Escape characters significant to ffmpeg filter argument parsing.
+    return (
+        path.replace("\\", "\\\\")
+        .replace(":", "\\:")
+        .replace("'", "\\'")
+        .replace(",", "\\,")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+    )
 
 
 def write_transcript(words, keep_segments, transcript_path, log):

@@ -1,15 +1,14 @@
 # Snappy Cut (Parakeet TDT)
 
-Mac GUI that removes silences and filler words from videos, then exports a YouTube-ready H.264 + AAC edit.
+Mac GUI that trims long silences from videos and exports a YouTube-ready H.264 + AAC edit with baked-in captions.
 
 ## Features
-- Silence detection with adjustable aggressiveness.
-- Filler-word cutting from Parakeet TDT transcripts.
+- Silence-only cutting with a simple pause-size slider.
 - Handle padding around cuts to avoid clipped syllables.
 - Optional transcript export to `.txt`.
 - Captions generated with Parakeet and aligned to the edited timeline.
 - Editable caption segment UI before export.
-- Caption output as sidecar `.srt` and embedded MP4 subtitle track.
+- Caption output as sidecar `.srt` and burned into the output MP4 (fallback to embedded subtitle track if needed).
 - Exports `.mp4` (H.264 + AAC) ready for upload.
 - Supports `.mp4`, `.mov`, and `.m4v` inputs.
 
@@ -17,7 +16,7 @@ Mac GUI that removes silences and filler words from videos, then exports a YouTu
 1. Extract mono 16 kHz audio with `ffmpeg`.
 2. Transcribe with Parakeet TDT (NeMo) for word timing.
 3. Detect silence with `ffmpeg` `silencedetect`.
-4. Merge filler + silence ranges, add handles, invert to keep ranges.
+4. Cut only the excess part of silences above your selected pause size.
 5. Concatenate keep ranges and export via `ffmpeg`.
 
 ## Requirements
@@ -47,19 +46,17 @@ python app.py
 1. Choose the input video.
 2. Pick an output `.mp4` path.
 3. (Optional) Keep or change the transcript `.txt` path.
-4. Adjust aggressiveness and handle size.
-5. Edit filler words if needed.
+4. Set how much pause you want to keep.
+5. Adjust handle size if needed.
 6. (Optional) Generate/refresh captions, then edit caption text rows.
 7. Click Process.
 
 ## Settings
-- Aggressiveness: higher removes more silence (shorter minimum pause length, less negative threshold).
+- Keep pauses up to: the amount of silence retained per detected pause; anything longer is trimmed.
 - Handle size: adds padding around each cut segment.
-- Pause floor: keeps a minimum amount of conversational pause so cuts do not sound choppy.
 - Audio fade: short fade-in/out at each stitch to smooth abrupt audio changes.
 - Save transcript: writes a `.txt` transcript next to the output by default.
-- Filler words: comma-separated list matched case-insensitively.
-- Enable captions: on by default; writes `.srt` and embeds subtitles into MP4.
+- Enable captions: on by default; writes `.srt` and burns subtitles into MP4.
 - Caption editor: lets you change caption text per timestamped segment.
 
 ## Project layout

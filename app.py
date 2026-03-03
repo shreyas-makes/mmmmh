@@ -68,38 +68,24 @@ class CaptionPreviewWorker(QRunnable):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Snappy Cut - Parakeet TDT")
+        self.setWindowTitle("Snappy Cut - Silence + Captions")
         self.thread_pool = QThreadPool.globalInstance()
 
         self.input_path = QLineEdit()
         self.output_path = QLineEdit()
         self.output_path.editingFinished.connect(self.handle_output_edited)
-        self.filler_words = QLineEdit(
-            "um, uh, uhh, umm, erm, ah, aah, like, you know, sort of, kind of"
-        )
-
-        self.aggression = QSlider()
-        self.aggression.setOrientation(Qt.Horizontal)
-        self.aggression.setMinimum(0)
-        self.aggression.setMaximum(100)
-        self.aggression.setValue(60)
-
-        self.aggression_label = QLabel()
+        self.silence_ok_ms = QSlider()
+        self.silence_ok_ms.setOrientation(Qt.Horizontal)
+        self.silence_ok_ms.setMinimum(80)
+        self.silence_ok_ms.setMaximum(700)
+        self.silence_ok_ms.setValue(180)
+        self.silence_ok_ms.setSingleStep(10)
+        self.silence_ok_ms_label = QLabel()
 
         self.handle_ms = QSpinBox()
         self.handle_ms.setRange(0, 500)
         self.handle_ms.setValue(200)
         self.handle_ms.setSuffix(" ms")
-
-        self.breath_ms = QSpinBox()
-        self.breath_ms.setRange(0, 500)
-        self.breath_ms.setValue(120)
-        self.breath_ms.setSuffix(" ms")
-
-        self.pause_floor_ms = QSpinBox()
-        self.pause_floor_ms.setRange(80, 500)
-        self.pause_floor_ms.setValue(180)
-        self.pause_floor_ms.setSuffix(" ms")
 
         self.audio_fade_ms = QSpinBox()
         self.audio_fade_ms.setRange(0, 200)
@@ -113,7 +99,7 @@ class MainWindow(QMainWindow):
         self.transcript_auto = True
         self.transcript_path.textEdited.connect(self.disable_transcript_auto)
 
-        self.captions_enabled = QCheckBox("Enable captions (embedded + SRT)")
+        self.captions_enabled = QCheckBox("Enable captions (burned into MP4 + SRT)")
         self.captions_enabled.setChecked(True)
         self.caption_path = QLineEdit()
         self.caption_auto = True
@@ -174,13 +160,10 @@ class MainWindow(QMainWindow):
         caption_row.addWidget(browse_caption)
         form.addRow(self.captions_enabled, caption_row)
 
-        form.addRow("Aggressiveness", self.aggression)
-        form.addRow("Aggressiveness details", self.aggression_label)
+        form.addRow("Keep pauses up to", self.silence_ok_ms)
+        form.addRow("Pause setting", self.silence_ok_ms_label)
         form.addRow("Handle size", self.handle_ms)
-        form.addRow("Pause floor", self.pause_floor_ms)
-        form.addRow("Breathing space (legacy)", self.breath_ms)
         form.addRow("Audio fade", self.audio_fade_ms)
-        form.addRow("Filler words", self.filler_words)
 
         layout.addLayout(form)
         layout.addWidget(self.refresh_captions_btn)
@@ -193,8 +176,8 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        self.aggression.valueChanged.connect(self.update_aggression_label)
-        self.update_aggression_label()
+        self.silence_ok_ms.valueChanged.connect(self.update_silence_ok_label)
+        self.update_silence_ok_label()
 
     def choose_input(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -257,10 +240,10 @@ class MainWindow(QMainWindow):
             self.caption_auto = False
             self.caption_path.setText(path)
 
-    def update_aggression_label(self):
-        settings = self.derive_silence_settings(self.aggression.value())
-        self.aggression_label.setText(
-            f"cuts pauses > {settings['min_silence']:.2f}s when below {settings['silence_db']} dB"
+    def update_silence_ok_label(self):
+        ms = self.silence_ok_ms.value()
+        self.silence_ok_ms_label.setText(
+            f"keeps up to {ms} ms of each detected silence and removes the rest"
         )
 
     def run_pipeline(self):
@@ -269,21 +252,23 @@ class MainWindow(QMainWindow):
         if not input_path or not output_path:
             QMessageBox.warning(self, "Missing paths", "Please select input and output paths.")
             return
+        output_path = self.ensure_mp4_output(output_path)
+        self.output_path.setText(output_path)
+        self.maybe_set_transcript_path(output_path)
+        self.maybe_set_caption_path(output_path)
 
         if self.captions_enabled.isChecked() and not self.caption_path.text().strip():
             self.maybe_set_caption_path(output_path)
 
-        settings = self.derive_silence_settings(self.aggression.value())
+        settings = self.derive_silence_settings()
         params = {
             "input_path": input_path,
             "output_path": output_path,
             "silence_db": settings["silence_db"],
             "min_silence": settings["min_silence"],
             "handle_ms": self.handle_ms.value(),
-            "breath_ms": self.breath_ms.value(),
-            "pause_floor_ms": self.pause_floor_ms.value(),
+            "pause_floor_ms": self.silence_ok_ms.value(),
             "audio_fade_ms": self.audio_fade_ms.value(),
-            "filler_words": [w.strip() for w in self.filler_words.text().split(",") if w.strip()],
             "save_transcript": self.save_transcript.isChecked(),
             "transcript_path": self.transcript_path.text().strip(),
             "captions_enabled": self.captions_enabled.isChecked(),
@@ -324,15 +309,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing input", "Please select an input video first.")
             return
 
-        settings = self.derive_silence_settings(self.aggression.value())
+        settings = self.derive_silence_settings()
         params = {
             "input_path": input_path,
             "silence_db": settings["silence_db"],
             "min_silence": settings["min_silence"],
             "handle_ms": self.handle_ms.value(),
-            "breath_ms": self.breath_ms.value(),
-            "pause_floor_ms": self.pause_floor_ms.value(),
-            "filler_words": [w.strip() for w in self.filler_words.text().split(",") if w.strip()],
+            "pause_floor_ms": self.silence_ok_ms.value(),
         }
 
         self.progress.setVisible(True)
@@ -347,6 +330,12 @@ class MainWindow(QMainWindow):
 
         worker = CaptionPreviewWorker(params, signals)
         self.thread_pool.start(worker)
+
+    def ensure_mp4_output(self, output_path):
+        path = Path(output_path)
+        if path.suffix.lower() == ".mp4":
+            return str(path)
+        return str(path.with_suffix(".mp4"))
 
     def on_caption_preview_finished(self, result):
         self.progress.setVisible(False)
@@ -407,17 +396,8 @@ class MainWindow(QMainWindow):
         return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
 
     @staticmethod
-    def derive_silence_settings(aggression_value):
-        quiet_floor_db = -40
-        speech_edge_db = -28
-        silence_db = int(
-            quiet_floor_db + (aggression_value / 100) * (speech_edge_db - quiet_floor_db)
-        )
-
-        long_pause = 0.90
-        short_pause = 0.35
-        min_silence_len = long_pause - (aggression_value / 100) * (long_pause - short_pause)
-        return {"silence_db": silence_db, "min_silence": round(min_silence_len, 2)}
+    def derive_silence_settings():
+        return {"silence_db": -35, "min_silence": 0.12}
 
 
 if __name__ == "__main__":
