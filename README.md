@@ -1,6 +1,9 @@
-# mmmmhh (Electron + Python)
+# mmmmhh
 
-Desktop video editor that trims long silences and exports a YouTube-ready MP4 with captions.
+Desktop video editor that trims long silences and exports a YouTube-ready MP4 with captions
+
+<img width="1536" height="1024" alt="ChatGPT Banner Design Mar 4 2026" src="https://github.com/user-attachments/assets/266c22e7-72ac-478e-a4d6-7f2113a8bfbe" />
+
 
 ## Features
 - Silence-only cutting with pause-size control.
