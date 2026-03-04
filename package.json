@@ -1,0 +1,39 @@
+{
+  "name": "mmmmhh",
+  "version": "0.1.0",
+  "description": "mmmmhh desktop editor (silence trim + baked captions)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "setup:mac": "./scripts/bootstrap_mac.sh",
+    "doctor": "./scripts/doctor.sh",
+    "dist": "npx electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "^36.0.0"
+  },
+  "build": {
+    "appId": "com.mmmmhh.app",
+    "productName": "mmmmhh",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "electron_bridge.py",
+      "pipeline.py",
+      "app.py",
+      "requirements.txt",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.video"
+    }
+  }
+}
