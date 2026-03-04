@@ -1,5 +1,8 @@
 # mmmmhh
 
+<img width="1536" height="1024" alt="ChatGPT Banner Design Mar 4 2026" src="https://github.com/user-attachments/assets/93d4efe6-ffcd-4edc-bf2d-877596f24b41" />
+
+
 `mmmmhh` is a simple app to make spoken videos tighter and cleaner.
 
 It can:
@@ -7,6 +10,7 @@ It can:
 - keep natural pacing
 - add subtitles
 - export a final video
+
 
 ## Open the app
 
